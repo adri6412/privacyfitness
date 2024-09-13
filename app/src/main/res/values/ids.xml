@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="heartRateTextView" type="id" />
+    <item name="stepCountTextView" type="id" />
+    <item name="caloriesTextView" type="id" />
+    <item name="workoutSpinner" type="id" />
+    <item name="startButton" type="id" />
+</resources>
