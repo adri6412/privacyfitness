@@ -24,3 +24,8 @@ The app includes an optional 24/7 monitoring feature that can be enabled within 
 ## Server-Side Software
 
 The companion server-side software for this application can be found at https://github.com/adri6412/privacyfitness-server
+
+# Additional Info
+
+
+This app is for android wear and does not have a companion app so the data is sent to the server directly from the smartwatch. So make sure that either via bluetooth from your phone or via wifi the watch has internet access.
