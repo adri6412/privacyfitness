@@ -178,7 +178,6 @@ public class MonitoringService extends Service implements SensorEventListener, L
             wakeLock.release();
         }
     }
-
     @Override
     public IBinder onBind(Intent intent) {
         return binder;
