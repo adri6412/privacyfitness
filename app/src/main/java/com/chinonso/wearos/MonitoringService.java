@@ -191,16 +191,9 @@ public class MonitoringService extends Service implements SensorEventListener, L
             SharedPreferences.Editor editor = getSharedPreferences("MonitoringServicePrefs", MODE_PRIVATE).edit();
             editor.putBoolean("isMonitoring", true);
             editor.apply();
+            startLocationUpdates();
+            forceLocationUpdate();
 
-            if (!isGpsEnabled()) {
-                Log.e(TAG, "GPS is not enabled");
-                Intent intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(intent);
-            } else {
-                startLocationUpdates();
-                forceLocationUpdate();
-            }
 
             if (heartRateSensor != null) {
                 boolean hrRegistered = sensorManager.registerListener(this, heartRateSensor, SensorManager.SENSOR_DELAY_NORMAL);
