@@ -16,24 +16,24 @@ import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.os.Binder;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.provider.Settings;
 import android.util.Log;
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
-import com.google.android.gms.location.FusedLocationProviderClient;
-import com.google.android.gms.location.LocationCallback;
-import com.google.android.gms.location.LocationRequest;
-import com.google.android.gms.location.LocationResult;
-import com.google.android.gms.location.LocationServices;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -43,7 +43,7 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
-public class MonitoringService extends Service implements SensorEventListener {
+public class MonitoringService extends Service implements SensorEventListener, LocationListener {
     private static final String TAG = "MonitoringService";
     private static final String SERVER_URL = "https://fitapi.adrianofrongillo.ovh/api/bulk-data";
     private static final String CHANNEL_ID = "FitnessTrackingChannel";
@@ -51,6 +51,10 @@ public class MonitoringService extends Service implements SensorEventListener {
     private static final long DAILY_MONITORING_INTERVAL = 5 * 60 * 1000; // 5 minuti
     private static final int MAX_DATA_POINTS = 100;
     private static final long SEND_INTERVAL = 60 * 60 * 1000; // 1 ora in millisecondi
+    private static final long LOCATION_UPDATE_INTERVAL = 10000; // 10 secondi
+    private static final long LOCATION_UPDATE_FASTEST_INTERVAL = 5000; // 5 secondi
+    private static final long LOCATION_UPDATE_TIMEOUT = 30000; // 30 secondi
+    private static final long FORCE_UPDATE_INTERVAL = 5 * 60 * 1000; // 5 minuti
 
     private String currentWorkout = "";
     private int heartRate = 0;
@@ -64,8 +68,7 @@ public class MonitoringService extends Service implements SensorEventListener {
 
     private SensorManager sensorManager;
     private Sensor heartRateSensor, stepCountSensor, pressureSensor;
-    private FusedLocationProviderClient fusedLocationClient;
-    private LocationCallback locationCallback;
+    private LocationManager locationManager;
 
     private String userId;
     private int weight;
@@ -78,11 +81,14 @@ public class MonitoringService extends Service implements SensorEventListener {
     private long startTime;
     private Handler handler = new Handler();
     private Handler sendDataHandler = new Handler();
+    private Handler forceUpdateHandler = new Handler();
 
     private PowerManager.WakeLock wakeLock;
 
     private List<DataPoint> dataPoints = new ArrayList<>();
-    private Object Arrays;
+    private Location lastKnownLocation;
+    private long lastLocationUpdateTime;
+    private float lastPressureReading = 0;
 
     public class LocalBinder extends Binder {
         MonitoringService getService() {
@@ -99,6 +105,15 @@ public class MonitoringService extends Service implements SensorEventListener {
             sendDataHandler.postDelayed(this, SEND_INTERVAL);
         }
     };
+
+    private Runnable forceUpdateRunnable = new Runnable() {
+        @Override
+        public void run() {
+            forceLocationUpdate();
+            forceUpdateHandler.postDelayed(this, FORCE_UPDATE_INTERVAL);
+        }
+    };
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -110,7 +125,7 @@ public class MonitoringService extends Service implements SensorEventListener {
                 "MonitoringService::WakeLock");
 
         sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
-        heartRateSensor = sensorManager.getDefaultSensor(21);
+        heartRateSensor = sensorManager.getDefaultSensor(TYPE_HEART_RATE);
         stepCountSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER);
         pressureSensor = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE);
 
@@ -118,18 +133,7 @@ public class MonitoringService extends Service implements SensorEventListener {
         Log.d(TAG, "Step Count Sensor: " + (stepCountSensor != null ? "Available" : "Not available"));
         Log.d(TAG, "Pressure Sensor: " + (pressureSensor != null ? "Available" : "Not available"));
 
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
-        locationCallback = new LocationCallback() {
-            @Override
-            public void onLocationResult(LocationResult locationResult) {
-                if (locationResult == null) {
-                    return;
-                }
-                for (Location location : locationResult.getLocations()) {
-                    updateLocationInfo(location);
-                }
-            }
-        };
+        locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
 
         SharedPreferences sharedPreferences = getSharedPreferences("UserData", MODE_PRIVATE);
         userId = sharedPreferences.getString("userId", "");
@@ -179,19 +183,6 @@ public class MonitoringService extends Service implements SensorEventListener {
     public IBinder onBind(Intent intent) {
         return binder;
     }
-    private void initializeSensors() {
-        SensorManager sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
-        Sensor heartRateSensor = sensorManager.getDefaultSensor(TYPE_HEART_RATE);
-
-        if (heartRateSensor != null) {
-            sensorManager.registerListener(this, heartRateSensor, SensorManager.SENSOR_DELAY_NORMAL);
-            Log.d(TAG, "Heart rate sensor registered");
-        } else {
-            Log.e(TAG, "Heart rate sensor not available on this device");
-        }
-    }
-
-
     private void startMonitoring(String workoutType) {
         if (!isMonitoring) {
             isMonitoring = true;
@@ -201,6 +192,17 @@ public class MonitoringService extends Service implements SensorEventListener {
             SharedPreferences.Editor editor = getSharedPreferences("MonitoringServicePrefs", MODE_PRIVATE).edit();
             editor.putBoolean("isMonitoring", true);
             editor.apply();
+
+            if (!isGpsEnabled()) {
+                Log.e(TAG, "GPS is not enabled");
+                Intent intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+            } else {
+                startLocationUpdates();
+                forceLocationUpdate();
+            }
+
             if (heartRateSensor != null) {
                 boolean hrRegistered = sensorManager.registerListener(this, heartRateSensor, SensorManager.SENSOR_DELAY_NORMAL);
                 Log.d(TAG, "Heart rate sensor registered: " + hrRegistered);
@@ -224,6 +226,7 @@ public class MonitoringService extends Service implements SensorEventListener {
             addDataPoint("start", currentWorkout);
 
             sendDataHandler.postDelayed(sendDataRunnable, SEND_INTERVAL);
+            forceUpdateHandler.postDelayed(forceUpdateRunnable, FORCE_UPDATE_INTERVAL);
         }
     }
 
@@ -231,15 +234,7 @@ public class MonitoringService extends Service implements SensorEventListener {
         sensorManager.registerListener(this, heartRateSensor, SensorManager.SENSOR_DELAY_NORMAL);
         sensorManager.registerListener(this, stepCountSensor, SensorManager.SENSOR_DELAY_NORMAL);
         sensorManager.registerListener(this, pressureSensor, SensorManager.SENSOR_DELAY_NORMAL);
-
-        LocationRequest locationRequest = LocationRequest.create()
-                .setInterval(DAILY_MONITORING_INTERVAL)
-                .setFastestInterval(DAILY_MONITORING_INTERVAL)
-                .setPriority(LocationRequest.PRIORITY_BALANCED_POWER_ACCURACY);
-
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, null);
-        }
+        startLocationUpdates();
     }
 
     private void startRegularMonitoring() {
@@ -262,6 +257,7 @@ public class MonitoringService extends Service implements SensorEventListener {
             handler.post(updateTimerRunnable);
             startForeground(NOTIFICATION_ID, createNotification());
             sendDataHandler.postDelayed(sendDataRunnable, SEND_INTERVAL);
+            forceUpdateHandler.postDelayed(forceUpdateRunnable, FORCE_UPDATE_INTERVAL);
         }
     }
 
@@ -278,8 +274,8 @@ public class MonitoringService extends Service implements SensorEventListener {
             sensorManager.unregisterListener(this);
             stopLocationUpdates();
             handler.removeCallbacks(updateTimerRunnable);
-
             sendDataHandler.removeCallbacks(sendDataRunnable);
+            forceUpdateHandler.removeCallbacks(forceUpdateRunnable);
 
             addDataPoint("stop", currentWorkout);
 
@@ -310,6 +306,7 @@ public class MonitoringService extends Service implements SensorEventListener {
 
         return builder.build();
     }
+
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Fitness Tracking Channel", NotificationManager.IMPORTANCE_DEFAULT);
@@ -317,66 +314,154 @@ public class MonitoringService extends Service implements SensorEventListener {
             notificationManager.createNotificationChannel(channel);
         }
     }
-
+    private static final long GPS_TIMEOUT = 30000;
     private void startLocationUpdates() {
-        LocationRequest locationRequest = LocationRequest.create();
-        locationRequest.setInterval(10000);
-        locationRequest.setFastestInterval(5000);
-        locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "Location permission not granted");
             return;
         }
-        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, null);
+
+        if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            try {
+                locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER,
+                        LOCATION_UPDATE_INTERVAL,
+                        5, // minima distanza in metri
+                        this
+                );
+                Log.d(TAG, "GPS location updates requested successfully");
+            } catch (Exception e) {
+                Log.e(TAG, "Error requesting GPS updates: " + e.getMessage());
+            }
+        } else {
+            Log.e(TAG, "GPS provider is not enabled");
+        }
+
+        // Prova anche con il network provider
+        if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            try {
+                locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        LOCATION_UPDATE_INTERVAL,
+                        5,
+                        this
+                );
+                Log.d(TAG, "Network location updates requested successfully");
+            } catch (Exception e) {
+                Log.e(TAG, "Error requesting network updates: " + e.getMessage());
+            }
+        } else {
+            Log.e(TAG, "Network provider is not enabled");
+        }
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (gpsInfo.isEmpty()) {
+                    Log.e(TAG, "GPS timeout: No location received after 30 seconds");
+                    // Qui puoi decidere se provare a riavviare gli aggiornamenti o notificare l'utente
+                }
+            }
+        }, GPS_TIMEOUT);
     }
 
     private void stopLocationUpdates() {
-        fusedLocationClient.removeLocationUpdates(locationCallback);
+        locationManager.removeUpdates(this);
+    }
+
+    private void forceLocationUpdate() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "Location permission not granted");
+            return;
+        }
+
+        Location lastKnownLocationGPS = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+        Location lastKnownLocationNetwork = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+
+        if (lastKnownLocationGPS != null) {
+            updateLocationInfo(lastKnownLocationGPS);
+            Log.d(TAG, "Last known GPS location obtained");
+        } else if (lastKnownLocationNetwork != null) {
+            updateLocationInfo(lastKnownLocationNetwork);
+            Log.d(TAG, "Last known network location obtained");
+        } else {
+            Log.e(TAG, "No last known location available");
+        }
     }
 
     private void updateLocationInfo(Location location) {
+        if (location == null) {
+            Log.e(TAG, "Received null location");
+            return;
+        }
+
         Log.d(TAG, "Location update received");
+        Log.d(TAG, "Provider: " + location.getProvider());
+        Log.d(TAG, "Accuracy: " + location.getAccuracy());
+        Log.d(TAG, "Time: " + new Date(location.getTime()).toString());
+
+        lastKnownLocation = location;
         String gpsInfo = String.format("Lat: %.6f, Lon: %.6f", location.getLatitude(), location.getLongitude());
         this.gpsInfo = gpsInfo;
         Log.d(TAG, "GPS Info: " + gpsInfo);
         addDataPoint("gps", gpsInfo);
 
-        if (location.hasAltitude()) {
+        updateAltitude(location);
+
+        notifyUIUpdates();
+    }
+
+    private void updateAltitude(Location location) {
+        if (location != null && location.hasAltitude()) {
             this.altitude = location.getAltitude();
             Log.d(TAG, "Altitude from GPS: " + this.altitude);
-            addDataPoint("altitude", location.getAltitude());
+        } else if (lastPressureReading != 0) {
+            this.altitude = SensorManager.getAltitude(SensorManager.PRESSURE_STANDARD_ATMOSPHERE, lastPressureReading);
+            Log.d(TAG, "Altitude from pressure sensor: " + this.altitude);
+        } else {
+            Log.d(TAG, "No altitude data available");
         }
+        addDataPoint("altitude", this.altitude);
     }
+
+    @Override
+    public void onLocationChanged(Location location) {
+        Log.d(TAG, "onLocationChanged called. Provider: " + location.getProvider());
+        updateLocationInfo(location);
+    }
+
+
+    @Override
+    public void onStatusChanged(String provider, int status, Bundle extras) {}
+
+    @Override
+    public void onProviderEnabled(String provider) {}
+
+    @Override
+    public void onProviderDisabled(String provider) {}
 
     @Override
     public void onSensorChanged(SensorEvent event) {
         Log.d(TAG, "Sensor event received: " + event.sensor.getType());
-            Log.d(TAG, "Step Count updated. Total steps: " + this.stepCount);
-            addDataPoint("step_count", this.stepCount);
-            addDataPoint("calories", calories);
-
-            Log.d(TAG, "Sensor changed: " + event.sensor.getType());
-            if (event.sensor.getType() == TYPE_HEART_RATE) {
-                this.heartRate = (int) event.values[0];
-                Log.d(TAG, "Heart Rate: " + this.heartRate);
-                Log.d(TAG, "Raw heart rate values: " + java.util.Arrays.toString(event.values));
-                addDataPoint("heart_rate", heartRate);
-            } else if (event.sensor.getType() == Sensor.TYPE_STEP_COUNTER) {
-                int totalSteps = (int) event.values[0];
-                if (initialStepCount == -1) {
-                    initialStepCount = totalSteps;
-                    Log.d(TAG, "Initial step count set to: " + initialStepCount);
-                }
-                this.stepCount = totalSteps - initialStepCount;
-                this.calories = calculateCalories(this.stepCount);
-                Log.d(TAG, "Step Count: " + this.stepCount + ", Calories: " + this.calories);
-                addDataPoint("step_count", stepCount);
-                addDataPoint("calories", calories);
-            } else if (event.sensor.getType() == Sensor.TYPE_PRESSURE) {
-                float pressure = event.values[0];
-                this.altitude = SensorManager.getAltitude(SensorManager.PRESSURE_STANDARD_ATMOSPHERE, pressure);
-                Log.d(TAG, "Altitude: " + this.altitude);
-                addDataPoint("altitude", this.altitude);
+        if (event.sensor.getType() == TYPE_HEART_RATE) {
+            this.heartRate = (int) event.values[0];
+            Log.d(TAG, "Heart Rate: " + this.heartRate);
+            Log.d(TAG, "Raw heart rate values: " + java.util.Arrays.toString(event.values));
+            addDataPoint("heart_rate", heartRate);
+        } else if (event.sensor.getType() == Sensor.TYPE_STEP_COUNTER) {
+            int totalSteps = (int) event.values[0];
+            if (initialStepCount == -1) {
+                initialStepCount = totalSteps;
+                Log.d(TAG, "Initial step count set to: " + initialStepCount);
             }
+            this.stepCount = totalSteps - initialStepCount;
+            this.calories = calculateCalories(this.stepCount);
+            Log.d(TAG, "Step Count: " + this.stepCount + ", Calories: " + this.calories);
+            addDataPoint("step_count", stepCount);
+            addDataPoint("calories", calories);
+        } else if (event.sensor.getType() == Sensor.TYPE_PRESSURE) {
+            lastPressureReading = event.values[0];
+            updateAltitude(null);
+        }
 
         notifyUIUpdates();
     }
@@ -519,7 +604,6 @@ public class MonitoringService extends Service implements SensorEventListener {
             int seconds = (int) (elapsedTime / 1000) % 60;
             int minutes = (int) ((elapsedTime / (1000 * 60)) % 60);
             int hours = (int) ((elapsedTime / (1000 * 60 * 60)) % 24);
-
             timerText = String.format("%02d:%02d:%02d", hours, minutes, seconds);
             addDataPoint("timer", timerText);
 
@@ -529,5 +613,9 @@ public class MonitoringService extends Service implements SensorEventListener {
 
     public boolean isMonitoring() {
         return isMonitoring;
+    }
+
+    private boolean isGpsEnabled() {
+        return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
     }
 }
