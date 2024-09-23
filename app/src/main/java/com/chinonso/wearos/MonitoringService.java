@@ -320,48 +320,25 @@ public class MonitoringService extends Service implements SensorEventListener, L
             Log.e(TAG, "Location permission not granted");
             return;
         }
-
-        if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            try {
+        if (!hasGPSHardware()) {
+            Log.e(TAG, "Device does not have GPS hardware.");
+            return;
+        }
+        try {
+            // Request updates from both GPS and Network providers
+            List<String> providers = locationManager.getProviders(true);
+            for (String provider : providers) {
                 locationManager.requestLocationUpdates(
-                        LocationManager.GPS_PROVIDER,
+                        provider,
                         LOCATION_UPDATE_INTERVAL,
-                        5, // minima distanza in metri
+                        5, // Minimum distance in meters
                         this
                 );
-                Log.d(TAG, "GPS location updates requested successfully");
-            } catch (Exception e) {
-                Log.e(TAG, "Error requesting GPS updates: " + e.getMessage());
+                Log.d(TAG, provider + " location updates requested successfully");
             }
-        } else {
-            Log.e(TAG, "GPS provider is not enabled");
+        } catch (Exception e) {
+            Log.e(TAG, "Error requesting location updates: " + e.getMessage());
         }
-
-        // Prova anche con il network provider
-        if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-            try {
-                locationManager.requestLocationUpdates(
-                        LocationManager.NETWORK_PROVIDER,
-                        LOCATION_UPDATE_INTERVAL,
-                        5,
-                        this
-                );
-                Log.d(TAG, "Network location updates requested successfully");
-            } catch (Exception e) {
-                Log.e(TAG, "Error requesting network updates: " + e.getMessage());
-            }
-        } else {
-            Log.e(TAG, "Network provider is not enabled");
-        }
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (gpsInfo.isEmpty()) {
-                    Log.e(TAG, "GPS timeout: No location received after 30 seconds");
-                    // Qui puoi decidere se provare a riavviare gli aggiornamenti o notificare l'utente
-                }
-            }
-        }, GPS_TIMEOUT);
     }
 
     private void stopLocationUpdates() {
@@ -425,10 +402,12 @@ public class MonitoringService extends Service implements SensorEventListener, L
 
     @Override
     public void onLocationChanged(Location location) {
-        Log.d(TAG, "onLocationChanged called. Provider: " + location.getProvider());
-        updateLocationInfo(location);
+        if (location != null) {
+            updateLocationInfo(location);
+        } else {
+            Log.e(TAG, "Received null location");
+        }
     }
-
 
     @Override
     public void onStatusChanged(String provider, int status, Bundle extras) {}
@@ -617,5 +596,8 @@ public class MonitoringService extends Service implements SensorEventListener, L
 
     private boolean isGpsEnabled() {
         return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+    }
+    private boolean hasGPSHardware() {
+        return getPackageManager().hasSystemFeature(PackageManager.FEATURE_LOCATION_GPS);
     }
 }

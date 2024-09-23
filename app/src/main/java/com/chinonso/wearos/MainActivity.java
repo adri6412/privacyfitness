@@ -3,14 +3,17 @@ package com.chinonso.wearos;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -162,50 +165,60 @@ public class MainActivity extends AppCompatActivity implements MonitoringService
             updateUI();
         }
     }
-    private void checkAndRequestPermissions() {
-        boolean needBodySensors = ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED;
-        boolean needLocation = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED;
-        boolean needActivityRecognition = ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED;
+    private static final int PERMISSION_REQUEST_CODE = 100;
 
+    private void checkAndRequestPermissions() {
         List<String> permissionsNeeded = new ArrayList<>();
 
-        if (needBodySensors) {
-            permissionsNeeded.add(Manifest.permission.BODY_SENSORS);
-        }
-        if (needLocation) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             permissionsNeeded.add(Manifest.permission.ACCESS_FINE_LOCATION);
         }
-        if (needActivityRecognition) {
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) {
+            permissionsNeeded.add(Manifest.permission.BODY_SENSORS);
+        }
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
             permissionsNeeded.add(Manifest.permission.ACTIVITY_RECOGNITION);
         }
 
         if (!permissionsNeeded.isEmpty()) {
-            ActivityCompat.requestPermissions(this, permissionsNeeded.toArray(new String[0]), PERMISSION_REQUEST_ALL);
+            ActivityCompat.requestPermissions(this, permissionsNeeded.toArray(new String[0]), PERMISSION_REQUEST_CODE);
+        }
+    }
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            boolean allGranted = true;
+            for (int result : grantResults) {
+                if (result != PackageManager.PERMISSION_GRANTED) {
+                    allGranted = false;
+                    break;
+                }
+            }
+            if (allGranted) {
+                // All permissions are granted. Proceed to start monitoring if needed.
+            } else {
+                // Show a message to the user explaining why the permissions are necessary.
+                showPermissionExplanationDialog();
+            }
         }
     }
 
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-
-        switch (requestCode) {
-            case PERMISSION_REQUEST_ALL:
-                boolean allGranted = true;
-                for (int result : grantResults) {
-                    if (result != PackageManager.PERMISSION_GRANTED) {
-                        allGranted = false;
-                        break;
-                    }
-                }
-                if (allGranted) {
-                    Log.d(TAG, "All permissions granted");
-                    // Qui puoi abilitare le funzionalità che richiedono i permessi
-                } else {
-                    Log.d(TAG, "Some permissions were denied");
-                    showPermissionExplanationDialog();
-                }
-                break;
-        }
+    private boolean isGPSEnabled() {
+        LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+    }
+    private void promptEnableGPS() {
+        new AlertDialog.Builder(this)
+                .setTitle("Enable GPS")
+                .setMessage("GPS is required for location tracking. Please enable GPS.")
+                .setPositiveButton("Enable", (dialog, which) -> {
+                    Intent intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+                    startActivity(intent);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void showPermissionExplanationDialog() {
@@ -228,11 +241,14 @@ public class MainActivity extends AppCompatActivity implements MonitoringService
             startButton.setText("Start");
         } else {
             if (checkPermissions()) {
-                startMonitoring();
-                startButton.setText("Stop");
+                if (isGPSEnabled()) {
+                    startMonitoring();
+                    startButton.setText("Stop");
+                } else {
+                    promptEnableGPS();
+                }
             } else {
                 checkAndRequestPermissions();
-                return;
             }
         }
         isMonitoringStarted = !isMonitoringStarted;
